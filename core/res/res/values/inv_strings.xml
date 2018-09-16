@@ -17,12 +17,9 @@
   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
-<resources>
-    <!-- Device keyhandlers -->
-    <java-symbol type="array" name="config_deviceKeyHandlerLibs" />
-    <java-symbol type="array" name="config_deviceKeyHandlerClasses" />
-
-    <java-symbol type="anim" name="inv_app_in" />
-    <java-symbol type="anim" name="inv_app_out" />
-
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- [CHAR LIMIT=NONE] Title of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permlab_toggleNavigationEditor">control navigation editor</string>
+    <!-- [CHAR LIMIT=NONE] Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+    <string name="permdesc_toggleNavigationEditor">Allows an application to control the navigation bar editor.</string>
 </resources>
