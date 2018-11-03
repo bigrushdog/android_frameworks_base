@@ -739,8 +739,6 @@ public class StatusBar extends SystemUI implements DemoMode,
 
         mPowerManager = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
 
-        mAm = (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE);
-
         mDeviceProvisionedController = Dependency.get(DeviceProvisionedController.class);
 
         mContext.getContentResolver().registerContentObserver(Settings.Secure.getUriFor(
