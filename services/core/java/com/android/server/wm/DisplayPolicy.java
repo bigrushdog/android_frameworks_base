@@ -118,10 +118,12 @@ import android.app.ActivityThread;
 import android.app.LoadedApk;
 import android.app.ResourcesManager;
 import android.app.StatusBarManager;
+import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
+import android.database.ContentObserver;
 import android.graphics.Insets;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
@@ -131,9 +133,11 @@ import android.hardware.power.V1_0.PowerHint;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.provider.Settings;
 import android.util.ArraySet;
 import android.util.Pair;
 import android.util.PrintWriterPrinter;
@@ -161,6 +165,7 @@ import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.policy.ScreenDecorationsUtils;
+import com.android.internal.smartutils.ActionUtils;
 import com.android.internal.util.ScreenShapeHelper;
 import com.android.internal.util.ScreenshotHelper;
 import com.android.internal.util.function.TriConsumer;
@@ -252,7 +257,8 @@ public class DisplayPolicy {
     private volatile boolean mHdmiPlugged;
 
     private volatile boolean mHasStatusBar;
-    private volatile boolean mHasNavigationBar;
+    // User defined bar visibility, regardless of factory configuration
+    private volatile boolean mNavbarVisible = false;
     // Can the navigation bar ever move to the side?
     private volatile boolean mNavigationBarCanMove;
     private volatile boolean mNavigationBarLetsThroughTaps;
@@ -372,6 +378,45 @@ public class DisplayPolicy {
     private InputConsumer mInputConsumer = null;
 
     private PointerLocationView mPointerLocationView;
+    private final Object mSettingsLock = new Object();
+    private CustomSettingsObserver mSettingsObserver;
+
+	private class CustomSettingsObserver extends ContentObserver {
+		public CustomSettingsObserver(Handler handler) {
+			super(handler);
+			observe();
+		}
+
+		@Override
+		public void onChange(boolean selfChange) {
+			updateSettings();
+		}
+
+		void updateSettings() {
+			synchronized (mSettingsLock) {
+				boolean doShowNavbar = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+						Settings.Secure.NAVIGATION_BAR_VISIBLE, ActionUtils.hasNavbarByDefault(mContext) ? 1 : 0,
+						UserHandle.USER_CURRENT) == 1;
+				if (doShowNavbar != mNavbarVisible) {
+					mNavbarVisible = doShowNavbar;
+				}
+				updateNavbarSize();
+			}
+		}
+
+		void observe() {
+			ContentResolver resolver = mContext.getContentResolver();
+			resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.NAVIGATION_BAR_VISIBLE), false,
+					this, UserHandle.USER_ALL);
+			resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.NAVIGATION_BAR_HEIGHT), false,
+					this, UserHandle.USER_ALL);
+			resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.NAVIGATION_BAR_HEIGHT_LANDSCAPE),
+					false, this, UserHandle.USER_ALL);
+			resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.NAVIGATION_BAR_WIDTH), false,
+					this, UserHandle.USER_ALL);
+			updateSettings();
+		}
+	}
 
     /**
      * The area covered by system windows which belong to another display. Forwarded insets is set
@@ -583,26 +628,13 @@ public class DisplayPolicy {
         mScreenshotHelper = displayContent.isDefaultDisplay
                 ? new ScreenshotHelper(mContext) : null;
 
-        if (mDisplayContent.isDefaultDisplay) {
-            mHasStatusBar = true;
-            mHasNavigationBar = mContext.getResources().getBoolean(R.bool.config_showNavigationBar);
-
-            // Allow a system property to override this. Used by the emulator.
-            // See also hasNavigationBar().
-            String navBarOverride = SystemProperties.get("qemu.hw.mainkeys");
-            if ("1".equals(navBarOverride)) {
-                mHasNavigationBar = false;
-            } else if ("0".equals(navBarOverride)) {
-                mHasNavigationBar = true;
-            }
-        } else {
-            mHasStatusBar = false;
-            mHasNavigationBar = mDisplayContent.supportsSystemDecorations();
-        }
+		mHasStatusBar = mDisplayContent.isDefaultDisplay;
 
         mRefreshRatePolicy = new RefreshRatePolicy(mService,
                 mDisplayContent.getDisplayInfo(),
                 mService.mHighRefreshRateBlacklist);
+
+        mSettingsObserver = new CustomSettingsObserver(new Handler());
     }
 
     void systemReady() {
@@ -667,7 +699,7 @@ public class DisplayPolicy {
     }
 
     public boolean hasNavigationBar() {
-        return mHasNavigationBar;
+        return mNavbarVisible;
     }
 
     public boolean hasStatusBar() {
@@ -1626,6 +1658,15 @@ public class DisplayPolicy {
         return mStatusBarController.checkHiddenLw();
     }
 
+	private void notifyLeftInLandscapeChanged(boolean isOnLeft) {
+		mHandler.post(() -> {
+			StatusBarManagerInternal statusBar = getStatusBarManagerInternal();
+			if (statusBar != null) {
+				statusBar.leftInLandscapeChanged(isOnLeft);
+			}
+		});
+	}
+
     private boolean layoutNavigationBar(DisplayFrames displayFrames, int uiMode, boolean navVisible,
             boolean navTranslucent, boolean navAllowedHidden,
             boolean statusBarForcesShowingNavigation) {
@@ -1642,7 +1683,15 @@ public class DisplayPolicy {
         final int displayHeight = displayFrames.mDisplayHeight;
         final int displayWidth = displayFrames.mDisplayWidth;
         final Rect dockFrame = displayFrames.mDock;
+        final int lastNavbarPosition = mNavigationBarPosition;
         mNavigationBarPosition = navigationBarPosition(displayWidth, displayHeight, rotation);
+
+		// broadcast left in landscape changes to listeners
+		if (lastNavbarPosition == NAV_BAR_LEFT && mNavigationBarPosition != NAV_BAR_LEFT) {
+			notifyLeftInLandscapeChanged(false);
+		} else if (lastNavbarPosition != NAV_BAR_LEFT && mNavigationBarPosition == NAV_BAR_LEFT) {
+			notifyLeftInLandscapeChanged(true);
+		}
 
         final Rect cutoutSafeUnrestricted = sTmpRect;
         cutoutSafeUnrestricted.set(displayFrames.mUnrestricted);
@@ -2677,47 +2726,44 @@ public class DisplayPolicy {
                     mStatusBarHeightForRotation[upsideDownRotation] =
                             mStatusBarHeightForRotation[landscapeRotation] =
                                     mStatusBarHeightForRotation[seascapeRotation] = 0;
-        }
+		}
+		updateNavbarSize();
+	}
 
-        // Height of the navigation bar when presented horizontally at bottom
-        mNavigationBarHeightForRotationDefault[portraitRotation] =
-        mNavigationBarHeightForRotationDefault[upsideDownRotation] =
-                res.getDimensionPixelSize(R.dimen.navigation_bar_height);
-        mNavigationBarHeightForRotationDefault[landscapeRotation] =
-        mNavigationBarHeightForRotationDefault[seascapeRotation] =
-                res.getDimensionPixelSize(R.dimen.navigation_bar_height_landscape);
+	private void updateNavbarSize() {
+        final Resources res = mContext.getResources();
+        final DisplayRotation displayRotation = mDisplayContent.getDisplayRotation();
+        final int portraitRotation = displayRotation.getPortraitRotation();
+        final int upsideDownRotation = displayRotation.getUpsideDownRotation();
+        final int landscapeRotation = displayRotation.getLandscapeRotation();
+        final int seascapeRotation = displayRotation.getSeascapeRotation();
+        final int uiMode = mService.mPolicy.getUiMode();
 
-        // Height of the navigation bar frame when presented horizontally at bottom
-        mNavigationBarFrameHeightForRotationDefault[portraitRotation] =
-        mNavigationBarFrameHeightForRotationDefault[upsideDownRotation] =
-                res.getDimensionPixelSize(R.dimen.navigation_bar_frame_height);
-        mNavigationBarFrameHeightForRotationDefault[landscapeRotation] =
-        mNavigationBarFrameHeightForRotationDefault[seascapeRotation] =
-                res.getDimensionPixelSize(R.dimen.navigation_bar_frame_height_landscape);
+        int navbarHeightDef = res
+                .getDimensionPixelSize(com.android.internal.R.dimen.navigation_bar_height);
+        int navbarHeightScale = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                Settings.Secure.NAVIGATION_BAR_HEIGHT, 100, UserHandle.USER_CURRENT);
+        int navbarHeightVal = getScaledNavbarSize(navbarHeightScale, navbarHeightDef);
+        mNavigationBarHeightForRotationDefault[portraitRotation] = mNavigationBarHeightForRotationDefault[upsideDownRotation] = navbarHeightVal;
 
-        // Width of the navigation bar when presented vertically along one side
-        mNavigationBarWidthForRotationDefault[portraitRotation] =
-        mNavigationBarWidthForRotationDefault[upsideDownRotation] =
-        mNavigationBarWidthForRotationDefault[landscapeRotation] =
-        mNavigationBarWidthForRotationDefault[seascapeRotation] =
-                res.getDimensionPixelSize(R.dimen.navigation_bar_width);
+        int navbarHeightLandDef = res.getDimensionPixelSize(
+                com.android.internal.R.dimen.navigation_bar_height_landscape);
+        int navbarHeightLandScale = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                Settings.Secure.NAVIGATION_BAR_HEIGHT_LANDSCAPE, 100, UserHandle.USER_CURRENT);
+        int navbarHeightLandVal = getScaledNavbarSize(navbarHeightLandScale, navbarHeightLandDef);
+        mNavigationBarHeightForRotationDefault[landscapeRotation] = mNavigationBarHeightForRotationDefault[seascapeRotation] = navbarHeightLandVal;
 
-        if (ALTERNATE_CAR_MODE_NAV_SIZE) {
-            // Height of the navigation bar when presented horizontally at bottom
-            mNavigationBarHeightForRotationInCarMode[portraitRotation] =
-            mNavigationBarHeightForRotationInCarMode[upsideDownRotation] =
-                    res.getDimensionPixelSize(R.dimen.navigation_bar_height_car_mode);
-            mNavigationBarHeightForRotationInCarMode[landscapeRotation] =
-            mNavigationBarHeightForRotationInCarMode[seascapeRotation] =
-                    res.getDimensionPixelSize(R.dimen.navigation_bar_height_landscape_car_mode);
-
-            // Width of the navigation bar when presented vertically along one side
-            mNavigationBarWidthForRotationInCarMode[portraitRotation] =
-            mNavigationBarWidthForRotationInCarMode[upsideDownRotation] =
-            mNavigationBarWidthForRotationInCarMode[landscapeRotation] =
-            mNavigationBarWidthForRotationInCarMode[seascapeRotation] =
-                    res.getDimensionPixelSize(R.dimen.navigation_bar_width_car_mode);
-        }
+        // Width of the navigation bar when presented vertically along one
+        // side
+        int navbarWidthDef = res
+                .getDimensionPixelSize(com.android.internal.R.dimen.navigation_bar_width);
+        int navbarWidthScale = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+                Settings.Secure.NAVIGATION_BAR_WIDTH, 100, UserHandle.USER_CURRENT);
+        int navbarWidthVal = getScaledNavbarSize(navbarWidthScale, navbarWidthDef);
+        mNavigationBarWidthForRotationDefault[portraitRotation] = 
+        		mNavigationBarWidthForRotationDefault[upsideDownRotation] =
+        		mNavigationBarWidthForRotationDefault[landscapeRotation] =
+        		mNavigationBarWidthForRotationDefault[seascapeRotation] = navbarWidthVal;
 
         mNavBarOpacityMode = res.getInteger(R.integer.config_navBarOpacityMode);
         mSideGestureInset = res.getDimensionPixelSize(R.dimen.config_backGestureInset);
@@ -2733,6 +2779,10 @@ public class DisplayPolicy {
         updateConfigurationAndScreenSizeDependentBehaviors();
         mWindowOutsetBottom = ScreenShapeHelper.getWindowOutsetBottomPx(mContext.getResources());
     }
+
+	private int getScaledNavbarSize(int percentage, int defaultDimen) {
+		return Math.round(defaultDimen * (percentage * 0.01f));
+	}
 
     void updateConfigurationAndScreenSizeDependentBehaviors() {
         final Resources res = getCurrentUserResources();
@@ -3508,9 +3558,9 @@ public class DisplayPolicy {
     /**
      * @return whether the navigation bar can be hidden, e.g. the device has a navigation bar
      */
-    private boolean canHideNavigationBar() {
-        return hasNavigationBar();
-    }
+	private boolean canHideNavigationBar() {
+		return hasNavigationBar() && !mAccessibilityManager.isTouchExplorationEnabled();
+	}
 
     private static boolean isNavBarEmpty(int systemUiFlags) {
         final int disableNavigationBar = (View.STATUS_BAR_DISABLE_HOME

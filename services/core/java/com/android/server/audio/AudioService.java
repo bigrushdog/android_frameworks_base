@@ -621,6 +621,17 @@ public class AudioService extends IAudioService.Stub
         }
     };
 
+    // only these packages are allowed to override Pulse visualizer lock
+    // TODO: This may need to be updated, perhaps move to res string array ?
+    private static final String[] VISUALIZER_WHITELIST = new String[] {
+            "android",
+            "com.android.systemui",
+            "com.android.keyguard",
+            "com.google.android.googlequicksearchbox"
+    };
+
+    private boolean mVisualizerLocked;
+
     ///////////////////////////////////////////////////////////////////////////
     // Construction
     ///////////////////////////////////////////////////////////////////////////
@@ -4096,6 +4107,27 @@ public class AudioService extends IAudioService.Stub
     @Override
     public boolean isStreamAffectedByMute(int streamType) {
         return (mMuteAffectedStreams & (1 << streamType)) != 0;
+    }
+
+    /** @hide */
+    @Override
+    public boolean isVisualizerLocked(String callingPackage) {
+        boolean isSystem = false;
+        for (int i = 0; i < VISUALIZER_WHITELIST.length; i++) {
+            if (TextUtils.equals(callingPackage, VISUALIZER_WHITELIST[i])) {
+                isSystem = true;
+                break;
+            }
+        }
+        return !isSystem && mVisualizerLocked;
+    }
+
+    /** @hide */
+    @Override
+    public void setVisualizerLocked(boolean doLock) {
+        if (mVisualizerLocked != doLock) {
+            mVisualizerLocked = doLock;
+        }
     }
 
     private void ensureValidDirection(int direction) {

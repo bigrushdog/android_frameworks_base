@@ -17,6 +17,7 @@
 package com.android.internal.statusbar;
 
 import android.content.ComponentName;
+import android.content.Intent;
 import android.graphics.Rect;
 import android.hardware.biometrics.IBiometricServiceReceiverInternal;
 import android.os.Bundle;
@@ -172,4 +173,13 @@ oneway interface IStatusBar
      * Notifies System UI whether the recents animation is running or not.
      */
     void onRecentsAnimationStateChanged(boolean running);
+
+    /**
+     * Begin AOSP Custom Rom hackery
+     */
+    void screenPinningStateChanged(boolean enabled);
+    void leftInLandscapeChanged(boolean isLeft);
+    void toggleFlashlight();
+    void toggleNavigationEditor();
+    void dispatchNavigationEditorResults(in Intent intent);
 }

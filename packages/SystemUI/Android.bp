@@ -63,7 +63,9 @@ android_library {
         "SystemUI-tags",
         "SystemUI-proto",
         "dagger2-2.19",
-        "jsr330"
+        "jsr330",
+        "trail-drawing",
+        "rebound"
     ],
     manifest: "AndroidManifest.xml",
 
